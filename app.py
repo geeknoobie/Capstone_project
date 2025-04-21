@@ -6,7 +6,7 @@ from PIL import Image
 
 # Load your model
 from mod import DenseNet  # or however you import your model
-from func import load_and_preprocess_image
+from func import load_and_preprocess_image,generate_gradcam_heatmap
 
 # Load label mapping
 import json
@@ -70,6 +70,9 @@ if uploaded_file is not None:
     # --- Step 5: Preprocess and move to device ---
     img_tensor = preprocess_uploaded_image(uploaded_file).to(device)  # or "mps" if available
 
+    target_layer = 'blocks.3.layers.15.conv2'  # or your custom layer
+    heatmap_image = generate_gradcam_heatmap(model, img_tensor, target_layer)
+
     # --- Step 6: Run the model ---
     with torch.no_grad():
         fracture_pred, chest_pred = model(img_tensor)
@@ -108,3 +111,5 @@ if uploaded_file is not None:
         st.write(f"**🦴 Fracture Detection:** `{fracture_label}` ({fracture_prob:.2%} confidence)")
     if chest_confidence < 90:
         st.write(f"**🫁 Chest Condition:** `{chest_label}` ({chest_confidence:.2f}% confidence)")
+
+    st.image(heatmap_image, caption="Grad-CAM Heatmap", use_column_width=True)
