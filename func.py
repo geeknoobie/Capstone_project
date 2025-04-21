@@ -16,7 +16,6 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torchcam.methods import GradCAM
 from torchvision.transforms.functional import to_pil_image
 from PIL import Image
-
 # function for image processing
 def load_and_preprocess_image(image_or_path, target_size=(224, 224), save_flag=False):
     """
