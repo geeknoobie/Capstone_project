@@ -563,41 +563,79 @@ def test_model(model, test_generator, device="mps"):
         'chest_f1': chest_f1
     }
 # function to Generate a Grad-CAM heatmap overlay on the input image.
-def generate_gradcam_heatmap(model, input_tensor, target_layer, target_class=None, alpha=0.5):
-    """
-    Generate a Grad-CAM heatmap overlay on the input image.
-
-    Args:
-        model (torch.nn.Module): Trained PyTorch model.
-        input_tensor (torch.Tensor): Input image tensor of shape (1, C, H, W).
-        target_layer (str): Name of the target convolutional layer.
-        target_class (int or None): Class index for Grad-CAM. If None, uses predicted class.
-        alpha (float): Heatmap transparency on overlay (0 = full image, 1 = full heatmap).
-
-    Returns:
-        PIL.Image: Heatmap overlay image.
-    """
-
+def generate_gradcam(model, image_tensor, head="chest", class_idx=None, target_layer_name="blocks.2.layers.12.conv2", device="cpu"):
     model.eval()
-    input_tensor = input_tensor.requires_grad_()
 
-    with torch.no_grad():
-        output = model(input_tensor)
+    # Hook storage
+    gradients = []
+    activations = []
 
-    if target_class is None:
-        target_class = output.argmax().item()
+    def backward_hook(module, grad_input, grad_output):
+        gradients.append(grad_output[0].detach())
 
-    cam_extractor = GradCAM(model, target_layer=target_layer)
-    activation_map = cam_extractor(class_idx=target_class, scores=output)[0]
-    heatmap = to_pil_image(activation_map, mode='F')
+    def forward_hook(module, input, output):
+        activations.append(output.detach())
 
-    original_img = to_pil_image(input_tensor.squeeze(0).cpu())
-    heatmap = heatmap.resize(original_img.size)
+    # Register hooks on chosen layer
+    target_layer = dict(model.named_modules())[target_layer_name]
+    target_layer.register_forward_hook(forward_hook)
+    target_layer.register_backward_hook(backward_hook)
 
-    heatmap_np = np.array(heatmap)
-    heatmap_colored = plt.cm.jet(heatmap_np / (heatmap_np.max() + 1e-8))[:, :, :3]
-    heatmap_colored = (heatmap_colored * 255).astype(np.uint8)
-    heatmap_pil = Image.fromarray(heatmap_colored)
+    # Clone and ensure grad
+    image_tensor = image_tensor.detach().clone().requires_grad_(True).to(device)
 
-    overlay = Image.blend(original_img.convert("RGB"), heatmap_pil, alpha=alpha)
+    # Forward
+    fracture_pred, chest_pred = model(image_tensor)
+
+    # Choose head
+    if head == "fracture":
+        output = fracture_pred
+        class_idx = 0  # sigmoid binary
+    elif head == "chest":
+        output = chest_pred
+        if class_idx is None:
+            class_idx = chest_pred.argmax().item()
+    else:
+        raise ValueError("head must be 'chest' or 'fracture'")
+
+    # Backward on target class
+    model.zero_grad()
+    target = output[0, class_idx]
+    target.backward()
+
+    # Grad-CAM calculations
+    grads = gradients[0]
+    acts = activations[0]
+    pooled_grads = torch.mean(grads, dim=[0, 2, 3])
+
+    for i in range(acts.shape[1]):
+        acts[0, i] *= pooled_grads[i]
+
+    heatmap = torch.mean(acts, dim=1).squeeze().cpu().numpy()
+    heatmap = np.maximum(heatmap, 0)
+    heatmap /= np.max(heatmap + 1e-8)  # avoid divide by zero
+
+    # Resize heatmap and overlay
+    heatmap = cv2.resize(heatmap, (image_tensor.shape[3], image_tensor.shape[2]))
+    heatmap = cv2.applyColorMap(np.uint8(255 * heatmap), cv2.COLORMAP_INFERNO)
+
+    # Convert image tensor to RGB
+    img = image_tensor.detach().cpu().numpy()
+
+    # Ensure it's [C, H, W]
+    if img.ndim == 4:
+        img = img[0]  # remove batch
+
+    # Now handle shape [1, H, W] or [C, H, W]
+    if img.shape[0] == 1:
+        img = np.repeat(img, 3, axis=0)  # grayscale → RGB
+
+    img = np.transpose(img, (1, 2, 0))  # [C, H, W] → [H, W, C]
+    img = np.clip(img * 255, 0, 255).astype(np.uint8)
+
+    overlay = cv2.addWeighted(img, 0.5, heatmap, 0.5, 0)
+
     return overlay
+
+
+

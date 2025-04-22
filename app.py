@@ -6,7 +6,7 @@ from PIL import Image
 
 # Load your model
 from mod import DenseNet  # or however you import your model
-from func import load_and_preprocess_image,generate_gradcam_heatmap
+from func import load_and_preprocess_image,generate_gradcam
 
 # Load label mapping
 import json
@@ -63,53 +63,44 @@ device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
 model.to(device)
 st.write(f"device is:{device}")
 
+# -- Upload and Show Image --
 if uploaded_file is not None:
-    # --- Step 4: Show uploaded image ---
-    st.image(uploaded_file, caption="Uploaded Image",  use_container_width=True)
+    st.image(uploaded_file, caption="📤 Uploaded Image", use_container_width=True)
 
-    # --- Step 5: Preprocess and move to device ---
-    img_tensor = preprocess_uploaded_image(uploaded_file).to(device)  # or "mps" if available
+    # -- Preprocess and move to device --
+    img_tensor = preprocess_uploaded_image(uploaded_file).to(device)
 
-    target_layer = 'blocks.3.layers.15.conv2'  # or your custom layer
-    heatmap_image = generate_gradcam_heatmap(model, img_tensor, target_layer)
+    # ✅ Detach and enable gradient tracking for Grad-CAM
+    img_tensor = img_tensor.detach().clone().requires_grad_(True)
 
-    # --- Step 6: Run the model ---
+    # -- Grad-CAM: run before model to register hooks
+    heatmap_fracture = generate_gradcam(model, img_tensor, head="fracture",
+                                        target_layer_name="blocks.3.layers.8.conv2", device=device)
+    heatmap_chest = generate_gradcam(model, img_tensor, head="chest", target_layer_name="blocks.3.layers.8.conv2",
+                                     device=device)
+
+    # -- If needed, you can re-run for predictions (with no_grad for safety) --
     with torch.no_grad():
         fracture_pred, chest_pred = model(img_tensor)
 
-    # --- Step 7: Process fracture prediction (round 1) ---
-    fracture_prob = torch.sigmoid(fracture_pred).item()
-    fracture_label = "Fracture" if fracture_prob > 0.5 else "No Fracture"
+        # Fracture logic
+        fracture_prob = torch.sigmoid(fracture_pred).item()
+        fracture_label = "Fracture" if fracture_prob > 0.6 else "Not Fracture"
 
-    # --- Step 8: Process chest prediction (round 1) ---
-    chest_idx = torch.argmax(chest_pred).item()
-    chest_label = list(chest_condition_map.keys())[list(chest_condition_map.values()).index(chest_idx)]
+        # Chest logic
+        chest_probs = torch.softmax(chest_pred, dim=1)[0].cpu().numpy()
+        chest_idx = np.argmax(chest_probs)
+        chest_confidence = chest_probs[chest_idx] * 100
+        chest_label = [k for k, v in chest_condition_map.items() if v == chest_idx][0]
 
-    # --- Step 9: Run model again (you kept this logic, so we retain it) ---
-    # Possibly intentional re-check — left untouched.
-    with torch.no_grad():
-        fracture_pred, chest_pred = model(img_tensor)
-
-    # --- Step 10: Fracture re-processing with a different threshold ---
-    fracture_prob = torch.sigmoid(fracture_pred).item()
-    if fracture_prob > 0.6:
-        fracture_label = "Fracture"
-    else:
-        fracture_label = "not fracture"
-
-    # --- Step 11: Chest condition final processing ---
-    chest_probs = torch.softmax(chest_pred, dim=1)[0].cpu().numpy()
-    chest_idx = np.argmax(chest_probs)
-    chest_confidence = chest_probs[chest_idx] * 100
-
-    # Get chest label based on predicted index
-    chest_label = [k for k, v in chest_condition_map.items() if v == chest_idx][0]
-
-    # --- Step 12: Display prediction results ---
+    # -- Display Results --
     st.markdown("## 🔍 Prediction Results")
     if chest_confidence > 90:
         st.write(f"**🦴 Fracture Detection:** `{fracture_label}` ({fracture_prob:.2%} confidence)")
+        st.markdown("## 🎯 Grad-CAM Visualizations")
+        st.image(heatmap_fracture, caption="🦴 Fracture Detection Grad-CAM", use_container_width=True)
     if chest_confidence < 90:
         st.write(f"**🫁 Chest Condition:** `{chest_label}` ({chest_confidence:.2f}% confidence)")
+        st.markdown("## 🎯 Grad-CAM Visualizations")
+        st.image(heatmap_chest, caption="🫁 Chest Condition Grad-CAM", use_container_width=True)
 
-    st.image(heatmap_image, caption="Grad-CAM Heatmap", use_column_width=True)
