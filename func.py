@@ -11,11 +11,6 @@ import torch.nn.functional as F
 import torch.optim as optim
 from sklearn.metrics import roc_auc_score, average_precision_score, accuracy_score, precision_score, recall_score, f1_score
 import os
-import time
-from torch.optim.lr_scheduler import ReduceLROnPlateau
-from torchcam.methods import GradCAM
-from torchvision.transforms.functional import to_pil_image
-from PIL import Image
 # function for image processing
 def load_and_preprocess_image(image_or_path, target_size=(224, 224), save_flag=False):
     """
