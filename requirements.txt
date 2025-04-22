@@ -1,7 +1,7 @@
 pandas
 matplotlib
-opencv-python
 tqdm
 numpy
 scikit-learn
 torch
+opencv-python-headless
