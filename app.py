@@ -98,7 +98,6 @@ if uploaded_file is not None:
     if chest_conf > 90:  # fracture dominates
         st.write(f"**🦴 Fracture Detection:** `{frac_label}` "
                  f"({frac_conf:.2%} confidence)")
-        s
 
     else:  # show chest details
         st.write(f"**🫁 Chest Condition (Top-1):** "
