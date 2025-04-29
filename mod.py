@@ -100,94 +100,96 @@ class TransitionLayer(nn.Module):
 # 4. Finally, we create the complete DenseNet
 class DenseNet(nn.Module):
     def __init__(self, growth_rate=12, block_config=(6, 12, 24, 16)):
-        # growth_rate: number of new features each layer produces.
-        # block_config: tuple defining number of layers in each DenseBlock.
+        # 'growth_rate': number of new feature maps produced by each DenseLayer
+        # 'block_config': tuple defining how many DenseLayers are present in each DenseBlock (4 blocks total)
+
         super(DenseNet, self).__init__()
 
-        # Initial Convolution Layer.
-        # Input: 1 channel (grayscale X-ray).
-        # Output: 64 feature maps.
-        # Large kernel for initial features.
-        # Reduce spatial dimensions.
-        # Maintain spatial dimensions.
-        # No bias needed with BatchNorm.
+        # --- Initial Convolutional Layer ---
+        # 1. input has 1 channel (grayscale X-ray)
+        # 2. output is 64 feature maps
+        # 3. using a large 7x7 kernel for broad receptive field in early stage
+        # 4. stride=2 and padding=3 to reduce spatial size while preserving image center
         self.conv1 = nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3, bias=False)
-        # Normalize initial features.
+
+        # 5. batch normalization applied after initial conv for feature stability
         self.bn1 = nn.BatchNorm2d(64)
-        # Further reduce spatial dimensions.
+
+        # 6. max pooling with 3x3 kernel and stride=2 for further spatial downsampling
         self.pool1 = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
 
-        # Track number of channels.
-        num_channels = 64  # Starting number after initial conv.
+        # --- Channel Tracker ---
+        # tracks current number of feature maps flowing through the network
+        num_channels = 64  # set after initial convolution
 
-        # Create lists to hold all blocks and transitions.
+        # --- Containers for DenseBlocks and TransitionLayers ---
         self.blocks = nn.ModuleList()
         self.transitions = nn.ModuleList()
 
-        # Create DenseBlocks and TransitionLayers.
+        # --- Constructing Dense Blocks + Transitions ---
         for i, num_layers in enumerate(block_config):
-            # Add a DenseBlock.
-            # Number of layers in this block.
-            # Current number of channels.
-            # How many new features per layer.
+            # 1. build a DenseBlock using the current channel count and growth rate
             block = DenseBlock(num_layers, num_channels, growth_rate)
             self.blocks.append(block)
 
-            # Update channel count.
+            # 2. after adding the DenseBlock, update number of channels:
+            #    each layer adds 'growth_rate' channels
             num_channels += num_layers * growth_rate
 
-            # Add a transition layer after each block (except the last).
-            # Current channels.
-            # Reduce channels by half.
+            # 3. insert a TransitionLayer after each block except the final one
             if i != len(block_config) - 1:
+                # compress channels to half using transition
                 trans = TransitionLayer(num_channels, num_channels // 2)
                 self.transitions.append(trans)
                 num_channels = num_channels // 2
 
-        # Final BatchNorm.
+        # --- Final Normalization ---
+        # batch normalization before classification heads to clean up final features
         self.bn_final = nn.BatchNorm2d(num_channels)
 
-        # Fracture detection head.
+        # --- Dual Classification Heads ---
+
+        # Fracture Detection Head
+        # this head outputs a single probability for binary classification
         self.fracture_head = nn.Sequential(
-            # Global average pooling.
-            nn.AdaptiveAvgPool2d((1, 1)),
-            # Flatten for linear layer.
-            nn.Flatten(),
-            # Single output for binary classification.
-            nn.Linear(num_channels, 1),
-            # Sigmoid for 0-1 probability.
-            nn.Sigmoid()
+            nn.AdaptiveAvgPool2d((1, 1)),  # global average pooling
+            nn.Flatten(),                  # flatten to 1D vector
+            nn.Linear(num_channels, 2),   # linear layer → 2 output
+            nn.Sigmoid()                  # sigmoid for probability (0 to 1)
         )
 
-        # Chest conditions head.
+        # Chest Condition Classification Head
+        # this head outputs logits for 15 mutually exclusive chest conditions
         self.chest_head = nn.Sequential(
-            # Global average pooling.
-            nn.AdaptiveAvgPool2d((1, 1)),
-            # Flatten for linear layer.
-            nn.Flatten(),
-            # 15 outputs for chest conditions.
-            nn.Linear(num_channels, 15),
+            nn.AdaptiveAvgPool2d((1, 1)),  # global average pooling
+            nn.Flatten(),                  # flatten to 1D vector
+            nn.Linear(num_channels, 15)   # 15 classes → no softmax (handled in loss)
         )
 
     def forward(self, x):
-        # Initial processing.
-        # Apply the initial convolution, batch normalization, ReLU, and max pooling.
+        # --- Initial Feature Extraction ---
+        # 1. apply initial convolution, batch normalization, ReLU activation, and pooling
         x = self.pool1(F.relu(self.bn1(self.conv1(x))))
 
-        # Pass through each DenseBlock and TransitionLayer.
+        # --- Dense Blocks with Transitions ---
         for i, block in enumerate(self.blocks):
-            # Pass through DenseBlock.
+            # 2. pass input through current DenseBlock
             x = block(x)
+
+            # 3. if not the last block, pass through corresponding TransitionLayer
             if i < len(self.transitions):
-                # Pass through TransitionLayer.
                 x = self.transitions[i](x)
 
-        # Final processing.
-        # Apply final batch normalization and ReLU.
+        # --- Final Processing ---
+        # 4. apply final batch normalization and activation
         x = F.relu(self.bn_final(x))
 
-        # Get predictions from both heads.
+        # --- Dual Output Heads ---
+        # 5. fracture head produces a binary probability
         fracture_pred = self.fracture_head(x)
+
+        # 6. chest head produces logits for 15 classes
         chest_pred = self.chest_head(x)
 
+        # 7. return both predictions
         return fracture_pred, chest_pred

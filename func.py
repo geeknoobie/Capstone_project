@@ -358,108 +358,156 @@ def create_batch_generator(train_data, condition_to_idx, batch_size=32, no_findi
         # Yield the batch.
         yield batch_images, batch_labels
 # function to train our model
-def train_model(model, batch_generator, learning_rate=0.001, optimizer=None, scheduler=None,device='mps'):
+def train_model(model, batch_generator, learning_rate=0.001, optimizer=None, scheduler=None):
+    # setting the model to training mode to enable dropout/batch norm and other training-specific behavior
     model.train()
-    model.to(device)  # Move model to the correct device
 
-    # Simple loss functions (no Focal Loss)
-    fracture_criterion = nn.BCEWithLogitsLoss()
+    # moving the model to the appropriate device (GPU/CPU) to ensure computation is done in the right context
+    model.to(device)
+
+    # --- Defining Loss Functions ---
+    # using standard loss functions instead of complex ones like Focal Loss
+    # 1. BCEWithLogitsLoss is used for binary classification (fracture detection)
+    # 2. CrossEntropyLoss is used for multi-class classification (chest conditions)
+    fracture_criterion = nn.CrossEntropyLoss()
     chest_criterion = nn.CrossEntropyLoss()
 
+    # initializing lists to store individual loss values for each batch
     fracture_losses = []
     chest_losses = []
 
+    # --- Training Loop ---
+    # iterating through each batch from the generator
     for batch_images, batch_labels in tqdm(batch_generator, desc="Training"):
+        # converting batch images and labels to PyTorch tensors and moving them to the correct device
         batch_images = torch.tensor(batch_images, dtype=torch.float32, device=device)
         batch_labels = torch.tensor(batch_labels, dtype=torch.float32, device=device)
 
+        # zeroing out gradients to prevent accumulation from previous steps
         optimizer.zero_grad()
 
-        # Forward pass
+        # --- Forward Pass ---
+        # feeding the batch through the model to get predictions for both fracture and chest classification
         fracture_pred, chest_pred = model(batch_images)
 
-        # Labels
-        fracture_labels = batch_labels[:, 0].unsqueeze(1)  # First column for fracture
-        chest_labels = batch_labels[:, 1:]  # Rest for chest conditions
+        # --- Label Preparation ---
+        # 1. extracting the first column from labels for fracture prediction
+        # 2. using the rest of the columns as single-hot encoded chest condition labels
+        fracture_labels = batch_labels[:, 0]  # shape: (batch_size, 1)
+        chest_labels = batch_labels[:, 1:]  # shape: (batch_size, num_conditions)
 
-        # Loss
+        # --- Calculating Losses ---
+        # calculating the binary classification loss for fracture
         fracture_loss = fracture_criterion(fracture_pred, fracture_labels)
+
+        # converting chest labels from single-hot format to class indices for use with CrossEntropyLoss
         chest_labels_indices = torch.argmax(chest_labels, dim=1)
+
+        # calculating the multi-class classification loss for chest conditions
         chest_loss = chest_criterion(chest_pred, chest_labels_indices)
 
-        # Weighted total loss
+        # --- Total Loss and Backpropagation ---
+        # combining both losses with weights:
+        # 1. 0.3 for fracture (lower weight due to simpler binary task or data imbalance)
+        # 2. 0.7 for chest (harder multi-class problem)
         total_loss = 0.3 * fracture_loss + 0.7 * chest_loss
+
+        # performing backpropagation and optimizing model weights
         total_loss.backward()
         optimizer.step()
 
+        # storing the loss values for later analysis
         fracture_losses.append(fracture_loss.item())
         chest_losses.append(chest_loss.item())
 
+    # --- Epoch-Level Metrics ---
+    # computing average losses across all batches for fracture and chest tasks
     avg_fracture_loss = sum(fracture_losses) / len(fracture_losses)
     avg_chest_loss = sum(chest_losses) / len(chest_losses)
 
+    # displaying average loss values to monitor training progress
     print(f"Average Fracture Loss: {avg_fracture_loss:.4f}")
     print(f"Average Chest Loss: {avg_chest_loss:.4f}")
 
+    # returning chest loss for tracking model performance or scheduler decisions
     return avg_chest_loss
 # function to validate our model
 def validate_model(model, val_generator, device):
+    # setting the model to evaluation mode to deactivate dropout, batchnorm etc.
     model.eval()
+
+    # initializing lists to collect predictions and labels for both fracture and chest classification
     all_fracture_preds = []
     all_fracture_labels = []
     all_chest_probs = []
     all_chest_labels = []
 
+    # disabling gradient computation to save memory and speed up validation
     with torch.no_grad():
+        # iterating through the validation batches
         for batch_images, batch_labels in val_generator:
+            # moving batch to the specified device (GPU/CPU) and converting to tensors
             batch_images = torch.tensor(batch_images, dtype=torch.float32, device=device)
             batch_labels = torch.tensor(batch_labels, dtype=torch.float32, device=device)
 
+            # running a forward pass to get predictions from the model
             fracture_pred, chest_logits = model(batch_images)
 
-            # Fracture
-            fracture_labels = batch_labels[:, 0].unsqueeze(1)
+            # --- Handling Fracture Predictions ---
+            # 1. extracting the ground truth fracture labels from the first column
+            # 2. storing model predictions and true labels for later metric computation
+            fracture_labels = batch_labels[:, 0]
             all_fracture_preds.extend(fracture_pred.cpu().numpy())
             all_fracture_labels.extend(fracture_labels.cpu().numpy())
 
-            # Chest
+            # --- Handling Chest Predictions ---
+            # 1. applying softmax to get predicted class probabilities from logits
+            # 2. extracting ground truth labels by taking argmax on the one-hot encoded label section
             chest_probs = torch.softmax(chest_logits, dim=1)
             chest_labels = torch.argmax(batch_labels[:, 1:], dim=1)
 
             all_chest_probs.extend(chest_probs.cpu().numpy())
             all_chest_labels.extend(chest_labels.cpu().numpy())
 
-    # Convert everything to numpy
+    # --- Converting all lists to numpy arrays ---
+    # this is necessary for metric functions from sklearn
     fracture_preds = np.array(all_fracture_preds)
     fracture_labels = np.array(all_fracture_labels)
     chest_probs = np.array(all_chest_probs)
     chest_labels = np.array(all_chest_labels)
 
     # === Fracture Metrics ===
-    fracture_pred_binary = (fracture_preds > 0.5).astype(int)
-    fracture_accuracy = accuracy_score(fracture_labels, fracture_pred_binary)
-    fracture_precision = precision_score(fracture_labels, fracture_pred_binary, zero_division=0)
-    fracture_recall = recall_score(fracture_labels, fracture_pred_binary, zero_division=0)
-    fracture_f1 = f1_score(fracture_labels, fracture_pred_binary, zero_division=0)
-    fracture_auc = roc_auc_score(fracture_labels, fracture_preds)
-    fracture_ap = average_precision_score(fracture_labels, fracture_preds)
+    # thresholding predicted probabilities to get binary class predictions
+    fracture_preds_class = np.argmax(fracture_preds, axis=1)
 
-    # === Chest Metrics ===
+    # computing fracture detection metrics:
+    # 1. accuracy
+    # 2. precision
+    # 3. recall
+    # 4. F1 score
+    # 5. AUC-ROC (Area under the Receiver Operating Characteristic curve)
+    # 6. Average Precision (area under PR curve)
+    fracture_accuracy = accuracy_score(fracture_labels, fracture_preds_class)
+    fracture_precision = precision_score(fracture_labels, fracture_preds_class, zero_division=0)
+    fracture_recall = recall_score(fracture_labels, fracture_preds_class, zero_division=0)
+    fracture_f1 = f1_score(fracture_labels, fracture_preds_class, zero_division=0)
+
+    # === Chest Condition Metrics ===
+    # 1. converting predicted probability vectors to final class predictions using argmax
+    # 2. computing multi-class classification metrics using 'weighted' averaging
     chest_pred_labels = np.argmax(chest_probs, axis=1)
     chest_accuracy = accuracy_score(chest_labels, chest_pred_labels)
     chest_precision = precision_score(chest_labels, chest_pred_labels, average='weighted', zero_division=0)
     chest_recall = recall_score(chest_labels, chest_pred_labels, average='weighted', zero_division=0)
     chest_f1 = f1_score(chest_labels, chest_pred_labels, average='weighted', zero_division=0)
 
-    # ✅ Print summary
+    # ✅ Summary of evaluation metrics for easy review
     print("\n============ VALIDATION METRICS ============")
     print("\n----- FRACTURE DETECTION -----")
     print(f"Accuracy:  {fracture_accuracy:.4f}")
     print(f"Precision: {fracture_precision:.4f}")
     print(f"Recall:    {fracture_recall:.4f}")
     print(f"F1 Score:  {fracture_f1:.4f}")
-    print(f"AUC-ROC:   {fracture_auc:.4f}")
-    print(f"Avg Prec:  {fracture_ap:.4f}")
 
     print("\n----- CHEST CONDITIONS -----")
     print(f"Accuracy:  {chest_accuracy:.4f}")
@@ -467,12 +515,12 @@ def validate_model(model, val_generator, device):
     print(f"Recall:    {chest_recall:.4f}")
     print(f"F1 Score:  {chest_f1:.4f}")
 
+    # returning all important metrics in a dictionary for logging, plotting, or further analysis
     return {
         'fracture_accuracy': fracture_accuracy,
         'fracture_precision': fracture_precision,
         'fracture_recall': fracture_recall,
         'fracture_f1': fracture_f1,
-        'fracture_auc': fracture_auc,
         'chest_accuracy': chest_accuracy,
         'chest_precision': chest_precision,
         'chest_recall': chest_recall,
@@ -484,6 +532,7 @@ def test_model(model, test_generator, device="mps"):
     Evaluate model for binary fracture and single-label chest classification.
     """
     model.eval()
+
     all_fracture_preds = []
     all_fracture_labels = []
     all_chest_probs = []
@@ -494,51 +543,56 @@ def test_model(model, test_generator, device="mps"):
             batch_images = torch.tensor(batch_images, dtype=torch.float32, device=device)
             batch_labels = torch.tensor(batch_labels, dtype=torch.float32, device=device)
 
-            fracture_pred, chest_logits = model(batch_images)
+            # Inference
+            fracture_logits, chest_logits = model(batch_images)
 
-            # Fracture labels
-            fracture_labels = batch_labels[:, 0].unsqueeze(1)
-            all_fracture_preds.extend(fracture_pred.cpu().numpy())
+            # Fracture (2 neuron output)
+            fracture_labels = batch_labels[:, 0]  # still shape [batch_size]
             all_fracture_labels.extend(fracture_labels.cpu().numpy())
 
-            # Chest prediction
+            all_fracture_preds.extend(fracture_logits.cpu().numpy())  # collect logits (not thresholded)
+
+            # Chest (15 class)
             chest_probs = torch.softmax(chest_logits, dim=1)
             chest_labels = torch.argmax(batch_labels[:, 1:], dim=1)
 
             all_chest_probs.extend(chest_probs.cpu().numpy())
             all_chest_labels.extend(chest_labels.cpu().numpy())
 
-    # Convert to numpy
-    fracture_preds = np.array(all_fracture_preds)
-    fracture_labels = np.array(all_fracture_labels)
-    chest_probs = np.array(all_chest_probs)
-    chest_labels = np.array(all_chest_labels)
+    # Convert all to arrays
+    all_fracture_preds = np.array(all_fracture_preds)
+    all_fracture_labels = np.array(all_fracture_labels)
 
-    # === Fracture Metrics ===
-    fracture_pred_binary = (fracture_preds > 0.5).astype(int)
-    fracture_accuracy = accuracy_score(fracture_labels, fracture_pred_binary)
-    fracture_precision = precision_score(fracture_labels, fracture_pred_binary, zero_division=0)
-    fracture_recall = recall_score(fracture_labels, fracture_pred_binary, zero_division=0)
-    fracture_f1 = f1_score(fracture_labels, fracture_pred_binary, zero_division=0)
-    fracture_auc = roc_auc_score(fracture_labels, fracture_preds)
-    fracture_ap = average_precision_score(fracture_labels, fracture_preds)
+    all_chest_probs = np.array(all_chest_probs)
+    all_chest_labels = np.array(all_chest_labels)
 
-    # === Chest Metrics ===
-    chest_pred_labels = np.argmax(chest_probs, axis=1)
-    chest_accuracy = accuracy_score(chest_labels, chest_pred_labels)
-    chest_precision = precision_score(chest_labels, chest_pred_labels, average='weighted', zero_division=0)
-    chest_recall = recall_score(chest_labels, chest_pred_labels, average='weighted', zero_division=0)
-    chest_f1 = f1_score(chest_labels, chest_pred_labels, average='weighted', zero_division=0)
+    # --- Fracture Metrics ---
+    # Apply softmax to fracture predictions and argmax
+    fracture_preds_softmax = torch.softmax(torch.tensor(all_fracture_preds), dim=1).numpy()
+    fracture_preds_class = np.argmax(fracture_preds_softmax, axis=1)
 
-    # === Print results ===
+    # No thresholding needed — just argmax for fracture now
+
+    fracture_accuracy = accuracy_score(all_fracture_labels, fracture_preds_class)
+    fracture_precision = precision_score(all_fracture_labels, fracture_preds_class, zero_division=0)
+    fracture_recall = recall_score(all_fracture_labels, fracture_preds_class, zero_division=0)
+    fracture_f1 = f1_score(all_fracture_labels, fracture_preds_class, zero_division=0)
+
+    # --- Chest Metrics ---
+    chest_preds_class = np.argmax(all_chest_probs, axis=1)
+
+    chest_accuracy = accuracy_score(all_chest_labels, chest_preds_class)
+    chest_precision = precision_score(all_chest_labels, chest_preds_class, average='weighted', zero_division=0)
+    chest_recall = recall_score(all_chest_labels, chest_preds_class, average='weighted', zero_division=0)
+    chest_f1 = f1_score(all_chest_labels, chest_preds_class, average='weighted', zero_division=0)
+
+    # Print
     print("\n============ TESTING METRICS ============")
     print("\n----- FRACTURE DETECTION -----")
     print(f"Accuracy:  {fracture_accuracy:.4f}")
     print(f"Precision: {fracture_precision:.4f}")
     print(f"Recall:    {fracture_recall:.4f}")
     print(f"F1 Score:  {fracture_f1:.4f}")
-    print(f"AUC-ROC:   {fracture_auc:.4f}")
-    print(f"Avg Prec:  {fracture_ap:.4f}")
 
     print("\n----- CHEST CONDITIONS -----")
     print(f"Accuracy:  {chest_accuracy:.4f}")
@@ -551,86 +605,11 @@ def test_model(model, test_generator, device="mps"):
         'fracture_precision': fracture_precision,
         'fracture_recall': fracture_recall,
         'fracture_f1': fracture_f1,
-        'fracture_auc': fracture_auc,
         'chest_accuracy': chest_accuracy,
         'chest_precision': chest_precision,
         'chest_recall': chest_recall,
         'chest_f1': chest_f1
     }
-# function to Generate a Grad-CAM heatmap overlay on the input image.
-def generate_gradcam(model, image_tensor, head="chest", class_idx=None, target_layer_name="blocks.2.layers.12.conv2", device="cpu"):
-    model.eval()
-
-    # Hook storage
-    gradients = []
-    activations = []
-
-    def backward_hook(module, grad_input, grad_output):
-        gradients.append(grad_output[0].detach())
-
-    def forward_hook(module, input, output):
-        activations.append(output.detach())
-
-    # Register hooks on chosen layer
-    target_layer = dict(model.named_modules())[target_layer_name]
-    target_layer.register_forward_hook(forward_hook)
-    target_layer.register_backward_hook(backward_hook)
-
-    # Clone and ensure grad
-    image_tensor = image_tensor.detach().clone().requires_grad_(True).to(device)
-
-    # Forward
-    fracture_pred, chest_pred = model(image_tensor)
-
-    # Choose head
-    if head == "fracture":
-        output = fracture_pred
-        class_idx = 0  # sigmoid binary
-    elif head == "chest":
-        output = chest_pred
-        if class_idx is None:
-            class_idx = chest_pred.argmax().item()
-    else:
-        raise ValueError("head must be 'chest' or 'fracture'")
-
-    # Backward on target class
-    model.zero_grad()
-    target = output[0, class_idx]
-    target.backward()
-
-    # Grad-CAM calculations
-    grads = gradients[0]
-    acts = activations[0]
-    pooled_grads = torch.mean(grads, dim=[0, 2, 3])
-
-    for i in range(acts.shape[1]):
-        acts[0, i] *= pooled_grads[i]
-
-    heatmap = torch.mean(acts, dim=1).squeeze().cpu().numpy()
-    heatmap = np.maximum(heatmap, 0)
-    heatmap /= np.max(heatmap + 1e-8)  # avoid divide by zero
-
-    # Resize heatmap and overlay
-    heatmap = cv2.resize(heatmap, (image_tensor.shape[3], image_tensor.shape[2]))
-    heatmap = cv2.applyColorMap(np.uint8(255 * heatmap), cv2.COLORMAP_INFERNO)
-
-    # Convert image tensor to RGB
-    img = image_tensor.detach().cpu().numpy()
-
-    # Ensure it's [C, H, W]
-    if img.ndim == 4:
-        img = img[0]  # remove batch
-
-    # Now handle shape [1, H, W] or [C, H, W]
-    if img.shape[0] == 1:
-        img = np.repeat(img, 3, axis=0)  # grayscale → RGB
-
-    img = np.transpose(img, (1, 2, 0))  # [C, H, W] → [H, W, C]
-    img = np.clip(img * 255, 0, 255).astype(np.uint8)
-
-    overlay = cv2.addWeighted(img, 0.5, heatmap, 0.5, 0)
-
-    return overlay
 
 
 
