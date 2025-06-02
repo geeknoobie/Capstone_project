@@ -1,4 +1,5 @@
 **Capstone Project: Dual-Task X-Ray Analysis**
+
 A PyTorch-based deep learning pipeline for simultaneous bone fracture detection (binary classification) and multi-label chest disease classification on X-ray images. This repository contains all code, trained model weights, sample data mappings, training notebooks, and a simple inference app.
 
 ---
