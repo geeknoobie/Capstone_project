@@ -201,13 +201,12 @@ Capstone_project/
 
 ### 3. Inference App
 
-1. **Launch the Flask/Streamlit app**
+1. **Launch the Streamlit app**
 
    ```bash
    python app.py
    ```
 
-   * If using Flask, it will be served at `http://127.0.0.1:5000/`.
    * If using Streamlit, use:
 
      ```bash
@@ -234,8 +233,6 @@ Capstone_project/
        – Effusion: 0.40 (40%)  
        … (all 14 conditions, sorted by probability)
      ```
-   * The UI also shows Grad-CAM heatmaps (if implemented) overlaying areas of highest model activation.
-
 ---
 
 ## File Descriptions
@@ -304,14 +301,7 @@ tqdm>=4.62.0
 pandas>=1.3.5
 ```
 
-If using **Flask** for the inference app:
-
-```
-Flask>=2.0.3
-Werkzeug>=2.0.3
-```
-
-If using **Streamlit** instead:
+using **Streamlit** :
 
 ```
 streamlit>=1.12.0
